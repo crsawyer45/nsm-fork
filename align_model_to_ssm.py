@@ -81,10 +81,10 @@ def find_ci_file(directory, name):
     return None
 
 # Load data
-TRAIN_DIR = "/home/k.wolcott/NSM/nsm/run_v44/" # TO DO: Choose training directory containing model ckpt and latent codes to be used with aligned models
-mu_L_path = "/home/k.wolcott/UF Dropbox/Katherine Wolcott/neural_shape_models/haag/atlas/builder/run_v44/2026_02-05_16_23_54_kw/atlas/atlas_sparse_landmarks.mrk.json"
+TRAIN_DIR = "/path/to/your/train/dir/NSM/nsm/run_v44" # TO DO: Choose training directory containing model ckpt and latent codes to be used with aligned models
+mu_L_path = "/path/to/your/SSM_lms/atlas/atlas/atlas_sparse_landmarks.mrk.json"
 mu_L = load_slicer_landmarks(mu_L_path)
-mu_M_path = "/home/k.wolcott/UF Dropbox/Katherine Wolcott/neural_shape_models/haag/atlas/builder/run_v44/2026_02-05_16_23_54_kw/atlas/atlas_model.ply"
+mu_M_path = "/path/to/your/SSM_model/atlas/atlas_model.ply"
 mu_M = load_mesh(mu_M_path)
 
 # Save copy of reference SSM mesh and lms in train_dir
@@ -95,8 +95,8 @@ mu_L_outpath = os.path.join(TRAIN_DIR, "fossils/atlas", os.path.basename(mu_L_pa
 save_slicer_landmarks(mu_L, mu_L_outpath, template_path=mu_L_path)
 
 # Batch align fossils to SSM using mesh and lms
-models_dir = "/home/k.wolcott/NSM/nsm/fossils/models_smooth_hollow/orig/" # TO DO: update to which mesh dir you want to align
-lms_dir = "/home/k.wolcott/NSM/nsm/fossils/lms/orig/"
+models_dir = "path/to/your/models/NSM/nsm/fossils/models_smooth_hollow/orig/" # TO DO: update to which mesh dir you want to align
+lms_dir = "/path/to/your/lms/NSM/nsm/fossils/lms/orig/"
 
 # Make output dirs
 out_models_dir = TRAIN_DIR + "fossils/models_smooth_hollow/aligned/" # TO DO: update which output dir you want
