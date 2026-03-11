@@ -25,26 +25,21 @@ from NSM.optimization import pca_initialize_latent, get_top_k_pcs, find_similar,
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
-# Define PC index and model checkpoint to use for analysis of novel mdeshes
-TRAIN_DIR = "run_v56" # TO DO: Choose training directory containing model ckpt and latent codes
-os.chdir(TRAIN_DIR)
-CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
-LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
-MODEL_PATH = 'model' + '/' + CKPT + '.pth'
+# Find shape completion files
+def find_shape_completion_files(root_dir):
+    return sorted(
+        str(p)
+        for p in Path(root_dir).rglob("*")
+        if (p.is_file()
+            and "zzz_" in p.name.lower()
+            and p.name.lower().endswith("shape_completion.vtk")))
 
-# Load config
-config = load_config(config_path='model_params_config.json')
-device = config.get("device", "cuda:0")
-train_paths = config['list_mesh_paths']
-all_vtk_files = [os.path.basename(f) for f in train_paths]
-
-# List of meshes to be classified
-# Randomly select test paths
-mesh_list = random.sample(config['val_paths'], 100) # TO DO: Choose val or test paths
-
-# Define predictions
-
+# Plot closest matches
 def plot_predictions(dim_reduced_coords, similar_coords, novel_coord, filepaths, out_fn):
+        if "tsne" in out_fn:
+            plot_type = "TSNE"
+        else:
+            plot_type = "PCA"
         plt.figure(figsize=(8, 6))
         plt.scatter(dim_reduced_coords[:, 0], dim_reduced_coords[:, 1], color='gray', alpha=0.3, label='Training Meshes')
         # Plot most similar (1st one) in pink
@@ -57,7 +52,7 @@ def plot_predictions(dim_reduced_coords, similar_coords, novel_coord, filepaths,
         # Aannotate each of the top-5 similar meshes
         for idx, (x, y) in zip(similar_ids, similar_coords):
             plt.text(x, y, filepaths[idx].split('.')[0], fontsize=6, color='black')
-        plt.title("Latent Space Visualization (PCA)")
+        plt.title(f"Latent Space Visualization {plot_type}")
         plt.xlabel("Component 1")
         plt.ylabel("Component 2")
         plt.legend()
@@ -65,6 +60,33 @@ def plot_predictions(dim_reduced_coords, similar_coords, novel_coord, filepaths,
         plt.tight_layout()
         plt.savefig(outfpath + "/" + out_fn, dpi=300)
         plt.close()
+
+# Define PC index and model checkpoint to use for analysis of novel mdeshes
+TRAIN_DIR = "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
+os.chdir(TRAIN_DIR)
+CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
+LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
+MODEL_PATH = 'model' + '/' + CKPT + '.pth'
+
+# Load config
+config = load_config(config_path='model_params_config.json')
+device = config.get("device", "cuda:0")
+train_paths = config['list_mesh_paths']
+all_vtk_files = [os.path.basename(f) for f in train_paths]
+
+# Build list of meshes to be classified
+random_meshes = False # TO DO: Randomly classify meshes? (True or False)
+
+# Randomly select meshes
+if random_meshes == True:
+    #mesh_list = random.sample(config['test_paths'], 5)
+    mesh_list = random.sample(config['val_paths'], 5) # TO DO: Choose val or test paths
+
+# If classying shape completion results
+shape_completion_results = True # TO DO: Inspect shape completion results? (True or False)
+if shape_completion_results == True:
+    mesh_dir = "shape_completion/predictions"
+    mesh_list = find_shape_completion_files(mesh_dir)
 
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
@@ -74,6 +96,7 @@ _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.95)
 # Loop through meshes
 summary_log = []
 for i, vert_fname in enumerate(mesh_list): 
+    print(vert_fname)
     print(f"\033[32m\n=== Processing {os.path.basename(vert_fname)} ===\033[0m")
     print(f"\033[32m\n=== Mesh {i} / {len(mesh_list)} ===\033[0m")
     # Make a new dir to save predictions
@@ -86,7 +109,7 @@ for i, vert_fname in enumerate(mesh_list):
     # Convert plys to vtks
     if '.ply' in vert_fname:
         ply_fname = vert_fname
-        _, vert_fname = convert_ply_to_vtk(ply_fname)
+        _, vert_fname = convert_ply_to_vtk(ply_fname, save=True)
 
     # Setup your dataset with just one mesh
     sdf_dataset = SDFSamples(
