@@ -26,9 +26,9 @@ meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
 # Define training directory
-TRAIN_DIR = "run_v44" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 sample_by_bbox = False  # TO DO: indicate if want to sample from manually placed bounding box from Slicer
@@ -38,12 +38,17 @@ sample_by_mrks = False # TO DO: indicate if want to sample from manually placed 
 config = load_config(config_path='model_params_config.json')
 device = config.get("device", "cuda:0")
 
-# Select paths to meshes for shape completion
-mesh_dir = "path/to/your/shape_completion/partial_meshes" # TO: Update path to your partial meshes made with create_partial_meshes.py
-mesh_list = random.sample([os.path.join(mesh_dir, name) for name in os.listdir(mesh_dir)], 20) # TO DO: Update how many to randomly sample
+# Select matching paths of partial meshes for shape completion
+mesh_dir = "fossils/models_smooth_hollow/aligned"
+mesh_list = os.listdir(mesh_dir)
+mesh_list = [os.path.join(mesh_dir, f) for f in random.sample(mesh_list, 5)]
+#mesh_list = [os.path.join(mesh_dir, f) for f in mesh_list]
 
 # Select corresponding bounding boxes with intact regions of specimens outlined (filenames should match meshes, but with .mrk.json extension)
-bbox_list = [os.path.join(dir, fname) for fname in os.listdir(dir) if ".mrk.json" in fname] # TO DO: Enter paths here
+if sample_by_bbox ==True:
+    bbox_dir = "path/to/your/bboxes"
+    bbox_list = [os.path.join(dir, fname) for fname in os.listdir(bbox_dir) if ".mrk.json" in fname] # TO DO: Enter paths here
+
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
 mean_latent = latent_codes.mean(dim=0, keepdim=True)
@@ -90,7 +95,20 @@ for i, vert_fname in enumerate(mesh_list):
     sdf_sample = sdf_dataset[0]  # returns a dict
     sample_dict, _ = sdf_sample
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
-    sdf_vals = sample_dict['gt_sdf']  # shape: [N, 1]
+    sdf_vals = sample_dict['gt_sdf'].to(device)  # shape: [N, 1]
+    # Number of points to sample
+    n_samples = 100
+
+    # Generate random indices for downsampling
+    indices = torch.randperm(points.size(0))[:n_samples]
+
+    # Downsample the points and corresponding SDF values
+    points = points[indices]
+    sdf_vals = sdf_vals[indices]
+
+    # Check the new shapes
+    print("Downsampled points shape:", points.shape)  # Should be [1000, 3]
+    print("Downsampled SDF values shape:", sdf_vals.shape)  # Should be [1000, 1]
     # Load points from specified bounding box or randomly downsample mesh
     if sample_by_bbox:
         bbox = load_slicer_roi_bbox(bbox_list[i])
@@ -98,23 +116,27 @@ for i, vert_fname in enumerate(mesh_list):
     elif sample_by_mrks:
         partial_pts = load_slicer_mrkup_pts(bbox_list[i])
     else: # Downsample intact ground truth mesh
-        partial_pts = downsample_partial_pointcloud(vert_fname, 180)
+        partial_pts = downsample_partial_pointcloud(vert_fname, 240)
     partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
     partial_cloud = pv.PolyData(partial_pts.cpu().numpy())
     partial_cloud.save(outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_partial_input.vtk")
 
     # Sample points with a variety of SDF values (not all = 0 to allow smoother fit)
-    partial_pts, sdfs = sample_near_surface(partial_pts, eps=0.005, fraction_nonzero=0.4, 
-                                            fraction_far=0.05, far_eps=0.05)
+    mesh = pv.read(vert_fname)
+    partial_pts, sdfs = sample_near_surface(mesh, partial_pts, eps=0.002, fraction_nonzero=0.1, 
+                                            fraction_far=0.0, far_eps=0.15)
     
     # Optimize latents
     print("\n-----Optimizing latents----\n")
+    print("Partial points shape: ", points.shape)  # Should be [N, 3]
+    print("SDF values shape: ", sdf_vals.shape)  # Should be [N, 1] or [N]
+    sdf_vals = sdf_vals.reshape(-1, 1)
     # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
-    latent_partial, _ = optimize_latent_partial(model, partial_pts, sdfs, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, 
+    latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, 
                                                        iters=5000, lr=1e-4, lambda_reg=1e-3, clamp_val=2.0, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.8, 
                                                        batch_inference_size=32768, multi_stage=False, device=device)
     # Phase 2 - Refinement - emphasis on local SDF samples and surface consistency to refine target specimen shape
-    latent_partial, _ = optimize_latent_partial(model, partial_pts, sdfs, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg, 
+    latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg, 
                                                         iters=8000, lr=1.3e-5, lambda_reg=7e-5, clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7, 
                                                         batch_inference_size=32768, multi_stage=True, device=device) # True because second stage using already initialized latent
     print("\nTranslated novel mesh into latent space!\n")
@@ -132,10 +154,10 @@ for i, vert_fname in enumerate(mesh_list):
     # Reconstruct the novel mesh
     with torch.no_grad():
         mesh_out = create_mesh(decoder=model, latent_vector=latent_partial, n_pts_per_axis=n_pts_per_axis,
-                                voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=None,
+                                voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=vert_fname,
                                 offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
-                                verbose=True, device=device, smooth=1.0)
-        
+                                verbose=True, device=device, scale_to_original_mesh=True) #, smooth=1.0)
+
     # Ensure it's PyVista PolyData
     if isinstance(mesh_out, list):
         mesh_out = mesh_out[0]
