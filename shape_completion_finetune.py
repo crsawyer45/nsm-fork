@@ -31,7 +31,7 @@ meshes.Mesh.point_coords = property(fixed_point_coords)
 import time
 
 # Define training directory
-TRAIN_DIR = "run_v56" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
 CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH =  TRAIN_DIR + '/latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = TRAIN_DIR +  '/model' + '/' + CKPT + '.pth'
@@ -57,7 +57,7 @@ with open(val_sum_fn, "r") as f:
     val = json.load(f)
 
 # Build test mesh name set from config
-test_mesh_names = {strip_mesh_name(p) for p in config["test_paths"]}
+test_mesh_names = {strip_mesh_name(p) for p in config["list_mesh_paths"]}
 print(f"Found {len(test_mesh_names)} test meshes in config")
 
 # Filter validation meshes
@@ -114,26 +114,38 @@ def run_trial(partial_mesh_path, gt_path, partial_pts, sdfs, cfg, out_dir, model
     # 2-phase optimization to "encode" partial mesh into latent space 
     print("\n-----Optimizing latents----\n")
     lat, _ = optimize_latent_partial(  # Phase 1: coarse reconstruction near mean
-        decoder=model, partial_pts=partial_pts, sdfs=sdfs, latent_dim=latent_codes.shape[1],
+        decoder=model, partial_pts=partial_pts.squeeze(), sdfs=sdfs, latent_dim=latent_codes.shape[1],
         mean_latent=mean_latent, latent_init=latent_codes, top_k=cfg['top_k'],
         iters=cfg['iters1'], lr=cfg['lr1'], lambda_reg=cfg['lambda1'],
         clamp_val=cfg['clamp'], latent_std=cfg['latent_std'], scheduler_step=cfg['sched_step'],
         scheduler_gamma=cfg['sched_gamma'], batch_inference_size=cfg['batch_infer'],
         device=device, multi_stage=False) 
     lat, _ = optimize_latent_partial(  # Phase 2: refine surface details for specific specimen
-        decoder=model, partial_pts=partial_pts, sdfs=sdfs, latent_dim=latent_codes.shape[1],
+        decoder=model, partial_pts=partial_pts.squeeze(), sdfs=sdfs, latent_dim=latent_codes.shape[1],
         latent_init=lat, iters=cfg['iters2'], lr=cfg['lr2'], lambda_reg=cfg['lambda2'],
         clamp_val=cfg['clamp'], latent_std=cfg['latent_std'], scheduler_step=cfg['sched_step'],
         scheduler_gamma=cfg['sched_gamma'], batch_inference_size=cfg['batch_infer'],
         device=device, multi_stage=True)  
     print("\nTranslated novel mesh into latent space!\n")
-    # Create mesh from optimized latent
+
+    # Reconstruction parameters
+    recon_grid_origin = 1.0
+    n_pts_per_axis = cfg.get('gridN', 256)
+    voxel_origin = (-recon_grid_origin, -recon_grid_origin, -recon_grid_origin)
+    voxel_size = (recon_grid_origin * 2) / (n_pts_per_axis - 1)
+    offset = np.array([0.0, 0.0, 0.0])
+    scale = 1.0
+    icp_transform = NumpyTransform(np.eye(4))
+    objects = 1
+
+    # Reconstruct the novel mesh
     with torch.no_grad():
-        mesh_out = create_mesh( 
-            decoder=model, latent_vector=lat, n_pts_per_axis=cfg['gridN'],
-            voxel_origin=(-1.0,-1.0,-1.0), voxel_size=(2.0/(cfg['gridN']-1)),
-            path_original_mesh=None, offset=np.array([0,0,0]), scale=1.0,
-            icp_transform=None, objects=1, verbose=False, device=device, smooth=1.0)
+        mesh_out = create_mesh(decoder=model, latent_vector=lat, n_pts_per_axis=n_pts_per_axis,
+                                voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=gt_path,
+                                offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
+                                verbose=True, device=device, scale_to_original_mesh=True) #smooth=1.0, 
+
+
     mp = mesh_out[0] if isinstance(mesh_out, list) else mesh_out
     if not isinstance(mp, pv.PolyData): mp = mp.extract_geometry()
     mp = mp.clean().triangulate()
@@ -157,25 +169,24 @@ def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_tr
     _, k95 = get_top_k_pcs(latent_codes, threshold=0.95)
     _, k90 = get_top_k_pcs(latent_codes, threshold=0.90)
     _, k99 = get_top_k_pcs(latent_codes, threshold=0.99)
-    latent_std = latent_codes.std().mean()
 
     # Randomly pick optimization parameters from provided values
     for t in range(n_trials):
 
         cfg = {
-            'top_k': random.choice([k95, k90, k99]),
-            'iters1': random.choice([3000, 5000, 7000]),
-            'iters2': random.choice([6000, 8000, 10000]),
-            'lr1': random.choice([1.0e-5, 1e-4, 1.0e-3]),
-            'lr2': random.choice([1e-6, 1e-5, 1e-4]),
-            'lambda1': random.choice([1e-4, 1e-3, 1e-3]),
-            'lambda2': random.choice([1e-5, 0.7e-4, 1e-3]),
-            'clamp': random.choice([None, 1, 2]),
-            'latent_std': latent_std,
-            'sched_step': random.choice([500, 800, 1000]),
-            'sched_gamma': random.choice([0.7, 0.8, 0.9]),
-            'batch_infer': random.choice([16384, 32768]),
+            'top_k': random.choice([k95, k99]),
+            'iters1': random.choice([4000, 5000, 6000]),
+            'iters2': random.choice([8000, 10000]),
+            'lr1': random.choice([5e-6, 1e-5, 5e-5, 1e-4]),
+            'lr2': random.choice([5e-6, 1e-5, 5e-5]),
+            'lambda1': random.choice([0, 1e-6]),
+            'lambda2': random.choice([5e-5, 1e-4, 2e-4]),
+            'clamp': random.choice([None, 1]),
+            'sched_step': random.choice([800, 1000]),
+            'sched_gamma': random.choice([0.7, 0.75]),
+            'batch_infer': random.choice([32768]),
             'gridN': random.choice([256, 320, 384]),
+            'latent_std': latent_codes.std().mean()
         }
         scores = []
         times = []
@@ -185,10 +196,10 @@ def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_tr
         # Run trial on randomly chosen config params and log chamfer score
         for i, (pm, gt) in enumerate(subset):
             start = time.time()
-            partial_pts = downsample_partial_pointcloud(pm, 180)
+            partial_pts = downsample_partial_pointcloud(pm, 235)
             partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
-            partial_pts, sdfs = sample_near_surface(partial_pts, eps=0.005, fraction_nonzero=0.4, 
-                                                    fraction_far=0.05, far_eps=0.05)
+            partial_pts, sdfs = sample_near_surface(pm, partial_pts, eps=0.005, fraction_nonzero=0.4, 
+                                                    fraction_far=0.1, far_eps=0.1)
             partial_pts = partial_pts.clone().detach()
             cd, _ = run_trial(pm, gt, partial_pts, sdfs, cfg, trial_dir, model, mean_latent, latent_codes, device)
             mesh_time = time.time() - start
@@ -218,13 +229,14 @@ mean_latent = latent_codes.mean(dim=0, keepdim=True)
 
 # Find the best hyperparameters using random search
 best_cfg, trial_rows = random_search(pairs, model, mean_latent, latent_codes, device,
-                                    out_dir="shape_completion/fine_tuning",
-                                    n_trials=5, valN=200,
-                                    log_path_csv="shape_completion/fine_tuning/trial_scores.csv")
+                                    out_dir= TRAIN_DIR + "/shape_completion/fine_tuning",
+                                    n_trials=10, valN=10,
+                                    log_path_csv= TRAIN_DIR + "/shape_completion/fine_tuning/trial_scores.csv")
 
 # Loop through meshes using best parameters
 summary_log = []
-for pm_path, gt_path in pairs[:20]:    
+subset = random.sample(pairs, 20)
+for pm_path, gt_path in subset:    
     print(f"\033[32m\n=== Processing {os.path.basename(pm_path)} ===\033[0m")
     # Make a new dir to save predictions
     vert_fname = pm_path
@@ -251,6 +263,7 @@ for pm_path, gt_path in pairs[:20]:
         rand_function=config['random_function'], 
         center_pts=config['center_pts'],
         norm_pts=config['normalize_pts'],
+        scale_method=config['scale_method'],
         reference_mesh=None,
         verbose=config['verbose'],
         save_cache=config['cache'],
@@ -263,16 +276,21 @@ for pm_path, gt_path in pairs[:20]:
     sample_dict, _ = sdf_sample
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
     sdf_vals = sample_dict['gt_sdf']  # shape: [N, 1]
-    partial_pts = downsample_partial_pointcloud(vert_fname, 180)
-    partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
-    partial_cloud = pv.PolyData(partial_pts.cpu().numpy())
-    partial_cloud.save(outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_partial_input.vtk")
+    
+    # Number of points to sample
+    n_samples = 100
 
-    # Sample points with a variety of SDF values (not all = 0 to allow smoother fit)
-    partial_pts, sdfs = sample_near_surface(partial_pts, eps=0.005, fraction_nonzero=0.4, 
-                                            fraction_far=0.05, far_eps=0.05)
-    partial_pts = partial_pts.clone().detach()
+    # Generate random indices for downsampling
+    indices = torch.randperm(points.size(0))[:n_samples]
+
+    # Downsample the points and corresponding SDF values
+    points = points[indices]
+    sdf_vals = sdf_vals[indices]
+
+    # Check the new shapes
+    print("Downsampled points shape:", points.shape)  # Should be [1000, 3]
+    print("Downsampled SDF values shape:", sdf_vals.shape)  # Should be [1000, 1]
 
     # Optimize latents
-    cd, pred_path = run_trial(pm_path, gt_path, partial_pts, sdfs, best_cfg, outfpath, model, mean_latent, latent_codes, device)
+    cd, pred_path = run_trial(pm_path, gt_path, points, sdf_vals, best_cfg, outfpath, model, mean_latent, latent_codes, device)
     print(f"\n{os.path.basename(pm_path)} Chamfer={cd:.4f} → {pred_path}\n") 
