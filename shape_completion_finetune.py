@@ -169,24 +169,25 @@ def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_tr
     _, k95 = get_top_k_pcs(latent_codes, threshold=0.95)
     _, k90 = get_top_k_pcs(latent_codes, threshold=0.90)
     _, k99 = get_top_k_pcs(latent_codes, threshold=0.99)
+    latent_std = latent_codes.std().mean()
 
     # Randomly pick optimization parameters from provided values
     for t in range(n_trials):
 
         cfg = {
-            'top_k': random.choice([k95, k99]),
-            'iters1': random.choice([4000, 5000, 6000]),
-            'iters2': random.choice([8000, 10000]),
-            'lr1': random.choice([5e-6, 1e-5, 5e-5, 1e-4]),
-            'lr2': random.choice([5e-6, 1e-5, 5e-5]),
-            'lambda1': random.choice([0, 1e-6]),
-            'lambda2': random.choice([5e-5, 1e-4, 2e-4]),
-            'clamp': random.choice([None, 1]),
-            'sched_step': random.choice([800, 1000]),
-            'sched_gamma': random.choice([0.7, 0.75]),
-            'batch_infer': random.choice([32768]),
+            'top_k': random.choice([k95, k90, k99]),
+            'iters1': random.choice([3000, 5000, 7000]),
+            'iters2': random.choice([6000, 8000, 10000]),
+            'lr1': random.choice([1.0e-5, 1e-4, 1.0e-3]),
+            'lr2': random.choice([1e-6, 1e-5, 1e-4]),
+            'lambda1': random.choice([1e-4, 1e-3, 1e-3]),
+            'lambda2': random.choice([1e-5, 0.7e-4, 1e-3]),
+            'clamp': random.choice([None, 1, 2]),
+            'latent_std': latent_std,
+            'sched_step': random.choice([500, 800, 1000]),
+            'sched_gamma': random.choice([0.7, 0.8, 0.9]),
+            'batch_infer': random.choice([16384, 32768]),
             'gridN': random.choice([256, 320, 384]),
-            'latent_std': latent_codes.std().mean()
         }
         scores = []
         times = []
@@ -278,7 +279,7 @@ for pm_path, gt_path in subset:
     sdf_vals = sample_dict['gt_sdf']  # shape: [N, 1]
     
     # Number of points to sample
-    n_samples = 100
+    n_samples = 200
 
     # Generate random indices for downsampling
     indices = torch.randperm(points.size(0))[:n_samples]
