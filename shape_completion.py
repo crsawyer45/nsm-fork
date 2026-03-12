@@ -26,13 +26,11 @@ meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
 # Define training directory
-TRAIN_DIR = "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v44" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '2500' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
-sample_by_bbox = False  # TO DO: indicate if want to sample from manually placed bounding box from Slicer
-sample_by_mrks = False # TO DO: indicate if want to sample from manually placed markups from Slicer
 
 # Load model config
 config = load_config(config_path='model_params_config.json')
@@ -43,11 +41,6 @@ mesh_dir = "fossils/models_smooth_hollow/aligned"
 mesh_list = os.listdir(mesh_dir)
 mesh_list = [os.path.join(mesh_dir, f) for f in random.sample(mesh_list, 5)]
 #mesh_list = [os.path.join(mesh_dir, f) for f in mesh_list]
-
-# Select corresponding bounding boxes with intact regions of specimens outlined (filenames should match meshes, but with .mrk.json extension)
-if sample_by_bbox ==True:
-    bbox_dir = "path/to/your/bboxes"
-    bbox_list = [os.path.join(dir, fname) for fname in os.listdir(bbox_dir) if ".mrk.json" in fname] # TO DO: Enter paths here
 
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
@@ -96,6 +89,7 @@ for i, vert_fname in enumerate(mesh_list):
     sample_dict, _ = sdf_sample
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
     sdf_vals = sample_dict['gt_sdf'].to(device)  # shape: [N, 1]
+    
     # Number of points to sample
     n_samples = 100
 
@@ -109,22 +103,6 @@ for i, vert_fname in enumerate(mesh_list):
     # Check the new shapes
     print("Downsampled points shape:", points.shape)  # Should be [1000, 3]
     print("Downsampled SDF values shape:", sdf_vals.shape)  # Should be [1000, 1]
-    # Load points from specified bounding box or randomly downsample mesh
-    if sample_by_bbox:
-        bbox = load_slicer_roi_bbox(bbox_list[i])
-        partial_pts = sample_points_in_bbox(vert_fname, bbox, n_points=800)
-    elif sample_by_mrks:
-        partial_pts = load_slicer_mrkup_pts(bbox_list[i])
-    else: # Downsample intact ground truth mesh
-        partial_pts = downsample_partial_pointcloud(vert_fname, 240)
-    partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
-    partial_cloud = pv.PolyData(partial_pts.cpu().numpy())
-    partial_cloud.save(outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_partial_input.vtk")
-
-    # Sample points with a variety of SDF values (not all = 0 to allow smoother fit)
-    mesh = pv.read(vert_fname)
-    partial_pts, sdfs = sample_near_surface(mesh, partial_pts, eps=0.002, fraction_nonzero=0.1, 
-                                            fraction_far=0.0, far_eps=0.15)
     
     # Optimize latents
     print("\n-----Optimizing latents----\n")
