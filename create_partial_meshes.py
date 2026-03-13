@@ -6,62 +6,59 @@ import vtk
 import json
 import argparse
 from glob import glob
-
-def load_ply(path):
-    reader = vtk.vtkPLYReader()
-    reader.SetFileName(path)
-    reader.Update()
-    return reader.GetOutput()
-
-def load_polydata(path):
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".ply":
-        reader = vtk.vtkPLYReader()
-    elif ext == ".vtk":
-        reader = vtk.vtkPolyDataReader()
-    else:
-        raise ValueError(f"Unsupported mesh format: {ext}")
-    reader.SetFileName(path)
-    reader.Update()
-    return reader.GetOutput()
+import pyvista as pv
+from scipy.spatial import cKDTree
 
 def save_ply(polydata, path, binary=True):
-    writer = vtk.vtkPLYWriter()
-    writer.SetFileName(path)
-    writer.SetInputData(polydata)
-    if binary:
-        writer.SetFileTypeToBinary()
-    else:
-        writer.SetFileTypeToASCII()
-    writer.Write()
+    if not isinstance(polydata, pv.PolyData):
+        polydata = pv.wrap(polydata)
+    polydata.save(path, binary=binary)
 
 def clean_triangulate(pd):
     cl = vtk.vtkCleanPolyData()
     cl.SetInputData(pd); cl.ConvertStripsToPolysOn(); cl.Update()
     tri = vtk.vtkTriangleFilter()
     tri.SetInputConnection(cl.GetOutputPort()); tri.PassLinesOff(); tri.PassVertsOff(); tri.Update()
-    return tri.GetOutput()
+    conn = vtk.vtkPolyDataConnectivityFilter()
+    conn.SetInputConnection(tri.GetOutputPort())
+    conn.SetExtractionModeToLargestRegion()
+    conn.Update()
+    
+    return pv.wrap(conn.GetOutput())
 
-def fast_subtract(original_pd, segment_pd, eps=0.0):
-    # distance field of segment, clip original to keep outside
-    dist = vtk.vtkImplicitPolyDataDistance()
-    dist.SetInput(segment_pd)
-    clip = vtk.vtkClipPolyData()
-    clip.SetInputData(original_pd)
-    clip.SetClipFunction(dist)
-    clip.SetValue(eps)          # keep points with distance >= eps (outside)
-    clip.InsideOutOff()
-    clip.GenerateClippedOutputOff()
-    clip.Update()
-    return clean_triangulate(clip.GetOutput())
+def fast_subtract(original_pd, segment_pd, eps=0.02):
+    # Delete faces near segment to remove
+    orig = pv.wrap(original_pd)
+    seg = pv.wrap(segment_pd)
+    # Get face centers
+    orig.compute_cell_sizes(length=False, area=False, volume=False)
+    face_centers = orig.cell_centers().points
+    # Find faces near segment
+    tree = cKDTree(seg.points)
+    dists, _ = tree.query(face_centers, k=1)
+    # Keep faces far from segment
+    orig['keep_face'] = (dists > eps).astype(int)
+    result = orig.threshold(0.5, scalars='keep_face', invert=False)
+    return result.extract_surface().clean().triangulate()
+
+def flip_to_ras(polydata):
+    # LPS to RAS coords (x flip)
+    transform = vtk.vtkTransform()
+    transform.Scale(-1, -1, 1)
+    tf = vtk.vtkTransformPolyDataFilter()
+    tf.SetInputData(polydata)
+    tf.SetTransform(transform)
+    tf.Update()
+    return tf.GetOutput()
 
 def create_partial_mesh(original_ply, segment_ply, output_ply):
-    print(f"  Loading original: {os.path.basename(original_ply)}")
-    original = clean_triangulate(load_polydata(original_ply))
-    print(f"  Loading segment: {os.path.basename(segment_ply)}")
-    segment  = clean_triangulate(load_polydata(segment_ply))
-    print("  Subtracting via implicit distance clip (fast)...")
-    partial = fast_subtract(original, segment, eps=0.0)
+    original = pv.wrap(clean_triangulate(pv.read(original_ply)))    
+    segment = pv.wrap(clean_triangulate(pv.read(segment_ply)))
+    segment = pv.wrap(flip_to_ras(segment))
+    # Debug: colored mesh by pt distances
+    #original_with_dist = original.compute_implicit_distance(segment, inplace=False)
+    #original_with_dist.save(output_ply.replace(".ply", "_distances.vtp"))
+    partial = fast_subtract(original, segment, eps=0.01)
     print(f"  Original: {original.GetNumberOfPoints()} vertices")
     print(f"  Segment:  {segment.GetNumberOfPoints()} vertices")
     print(f"  Partial:  {partial.GetNumberOfPoints()} vertices")
@@ -85,7 +82,6 @@ def create_validation_dataset(original_dir, segments_dir, output_dir, segment_to
         basename = os.path.basename(segment_file)
         base_name = basename.replace(f"_seg_{segment_to_remove:02d}.ply", "")
         print(f"\n{'='*60}")
-        print(f"Processing: {base_name}") 
         # Find corresponding original mesh (ground truth)
         original_ply = os.path.join(original_dir, f"{base_name}.ply")
         if not os.path.exists(original_ply):
