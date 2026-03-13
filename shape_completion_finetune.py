@@ -197,12 +197,34 @@ def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_tr
         # Run trial on randomly chosen config params and log chamfer score
         for i, (pm, gt) in enumerate(subset):
             start = time.time()
-            partial_pts = downsample_partial_pointcloud(pm, 235)
-            partial_pts = torch.tensor(partial_pts, dtype=torch.float32)
-            partial_pts, sdfs = sample_near_surface(pm, partial_pts, eps=0.005, fraction_nonzero=0.4, 
-                                                    fraction_far=0.1, far_eps=0.1)
-            partial_pts = partial_pts.clone().detach()
-            cd, _ = run_trial(pm, gt, partial_pts, sdfs, cfg, trial_dir, model, mean_latent, latent_codes, device)
+            if '.ply' in pm:
+                _, pm = convert_ply_to_vtk(pm, save=True)
+            sdf_dataset = SDFSamples(
+                                list_mesh_paths=[pm],
+                                multiprocessing=False,
+                                subsample=config["samples_per_object_per_batch"],
+                                print_filename=True,
+                                n_pts=config["n_pts_per_object"],
+                                p_near_surface=config['percent_near_surface'],
+                                p_further_from_surface=config['percent_further_from_surface'],
+                                sigma_near=config['sigma_near'],
+                                sigma_far=config['sigma_far'],
+                                rand_function=config['random_function'],
+                                center_pts=config['center_pts'],
+                                norm_pts=config['normalize_pts'],
+                                scale_method=config['scale_method'],
+                                reference_mesh=None,
+                                verbose=config['verbose'],
+                                save_cache=config['cache'],
+                                equal_pos_neg=config['equal_pos_neg'],
+                                fix_mesh=config['fix_mesh'])
+            sample_dict, _ = sdf_dataset[0]
+            points = sample_dict['xyz'].to(device)
+            sdf_vals = sample_dict['gt_sdf'].to(device)
+            indices = torch.randperm(points.size(0))[:200]
+            points = points[indices]
+            sdf_vals = sdf_vals[indices].reshape(-1, 1)
+            cd, _ = run_trial(pm, gt, points, sdf_vals, cfg, trial_dir, model, mean_latent, latent_codes, device)
             mesh_time = time.time() - start
             scores.append(cd)
             times.append(mesh_time)
@@ -276,7 +298,7 @@ for pm_path, gt_path in subset:
     sdf_sample = sdf_dataset[0]  # returns a dict
     sample_dict, _ = sdf_sample
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
-    sdf_vals = sample_dict['gt_sdf']  # shape: [N, 1]
+    sdf_vals = sample_dict['gt_sdf'].to(device).reshape(-1, 1)  # shape: [N, 1]
     
     # Number of points to sample
     n_samples = 200
