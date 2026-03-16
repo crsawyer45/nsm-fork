@@ -82,10 +82,14 @@ if random_meshes == True:
     #mesh_list = random.sample(config['test_paths'], 5)
     mesh_list = random.sample(config['val_paths'], 5) # TO DO: Choose val or test paths
 
+# Manually choose meshes
+else:
+    mesh_list = ["ZZZZZ_VP-UA-12945_hollow_align.vtk"]
+
 # If classying shape completion results
 shape_completion_results = True # TO DO: Inspect shape completion results? (True or False)
 if shape_completion_results == True:
-    mesh_dir = "shape_completion/predictions"
+    mesh_dir = "shape_completion/predictions/" + os.path.splitext(mesh_list[0])[0]
     mesh_list = find_shape_completion_files(mesh_dir)
 
 # Load model and latent codes
@@ -125,19 +129,40 @@ for i, vert_fname in enumerate(mesh_list):
         rand_function=config['random_function'], 
         center_pts=config['center_pts'],
         norm_pts=config['normalize_pts'],
+        scale_method=config['scale_method'],
+        scale_jointly=config['scale_jointly'],
         reference_mesh=None,
         verbose=config['verbose'],
         save_cache=config['cache'],
         equal_pos_neg=config['equal_pos_neg'],
-        fix_mesh=config['fix_mesh']
-        )
-
+        fix_mesh=config['fix_mesh'])
+    
     # Get the point/SDF data
     print("Setting up dataset")
     sdf_sample = sdf_dataset[0]  # returns a dict
     sample_dict, _ = sdf_sample
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
-    sdf_vals = sample_dict['gt_sdf']  # shape: [N, 1]
+    sdf_vals = sample_dict['gt_sdf'].to(device)  # shape: [N, 1]
+
+    # Extract normalization parameters
+    if hasattr(sdf_dataset, 'center') and sdf_dataset.center is not None:
+        # If scale_jointly=True
+        center = sdf_dataset.center
+        max_radius = sdf_dataset.max_radius
+        print(f"Using joint normalization: center={center}, max_radius={max_radius}")
+    else:
+        # Individual mesh normalization - need to load from stored data
+        # Check if center/max_radius are in sample_dict
+        if 'center_0' in sample_dict:
+            center = sample_dict['center_0'].cpu().numpy()
+            max_radius = sample_dict['max_radius_0'].cpu().numpy()
+            print(f"Using individual normalization: center={center}, max_radius={max_radius}")
+        else:
+            # Compute manually from original mesh
+            orig_mesh = pv.read(vert_fname)
+            center = orig_mesh.points.mean(axis=0)
+            max_radius = np.linalg.norm(orig_mesh.points - center, axis=1).max()
+            print(f"Computed normalization: center={center}, max_radius={max_radius}")
 
     # Optimize latents (DeepSDF has no encoder, so must use optimization to encode novel data)
     print("Optimizing latents")
@@ -195,20 +220,21 @@ for i, vert_fname in enumerate(mesh_list):
     objects = 1
 
     # Reconstruct the novel mesh 
-    mesh_out = create_mesh(
-        decoder=model,
-        latent_vector=latent_novel,
-        n_pts_per_axis=n_pts_per_axis,
-        voxel_origin=voxel_origin,
-        voxel_size=voxel_size,
-        path_original_mesh=None,
-        offset=offset,
-        scale=scale,
-        icp_transform=icp_transform,
-        objects=objects,
-        verbose=True,
-        device=device,
-        )
+    mesh_out = create_mesh(decoder=model, latent_vector=latent_novel, n_pts_per_axis=n_pts_per_axis,
+                                voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=vert_fname,
+                                offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
+                                verbose=True, device=device, scale_to_original_mesh=False) #, smooth=1.0)
+
+    # Debug
+    # Manually un-normalize
+    mesh_pv = pv.wrap(mesh_out)
+    if config['normalize_pts'] == True:
+        print("Normalizing output mesh to match training transforms...")
+        mesh_pv.points = mesh_pv.points * max_radius + center
+    print(f"Output mesh bounds: {mesh_pv.bounds}")
+    # Compare to input mesh
+    input_mesh = pv.read(vert_fname)
+    print(f"Input mesh bounds: {input_mesh.bounds}")
 
     # Ensure it's PyVista PolyData
     if isinstance(mesh_out, list):
