@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 from NSM.datasets import SDFSamples
 from NSM.models import TriplanarDecoder
-from NSM.mesh import get_sdfs
 from NSM.reconstruct import reconstruct_latent
 import torch.nn.functional as F
 import json
@@ -23,8 +22,8 @@ import vtk
 import re
 import random
 import open3d as o3d
-from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, get_sdfs, fixed_point_coords, safe_load_mesh_scalars 
-from NSM.optimization import pca_initialize_latent, get_top_k_pcs, sample_near_surface, downsample_partial_pointcloud, optimize_latent_partial
+from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, fixed_point_coords, safe_load_mesh_scalars 
+from NSM.optimization import pca_initialize_latent, get_top_k_pcs, optimize_latent_partial, normalize_mesh, get_norm_params
 # Monkey Patch into pymskt.mesh.meshes.Mesh
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
@@ -110,7 +109,7 @@ def chamfer_distance(pred_path, gt_path, n_samples=20000):
     return float(0.5*(d1 + d2)) # Return average distance (symmetric penalty)
 
 # 3) Run trial (uses optimize_latent_partial and create_mesh)
-def run_trial(partial_mesh_path, gt_path, partial_pts, sdfs, cfg, out_dir, model, mean_latent, latent_codes, device):
+def run_trial(partial_mesh_path, gt_path, partial_pts, sdf_dataset, sdfs, main_config, cfg, out_dir, model, mean_latent, latent_codes, device):
     # 2-phase optimization to "encode" partial mesh into latent space 
     print("\n-----Optimizing latents----\n")
     lat, _ = optimize_latent_partial(  # Phase 1: coarse reconstruction near mean
@@ -143,23 +142,25 @@ def run_trial(partial_mesh_path, gt_path, partial_pts, sdfs, cfg, out_dir, model
         mesh_out = create_mesh(decoder=model, latent_vector=lat, n_pts_per_axis=n_pts_per_axis,
                                 voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=gt_path,
                                 offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
-                                verbose=True, device=device, scale_to_original_mesh=True) #smooth=1.0, 
+                                verbose=True, device=device, scale_to_original_mesh=False) #smooth=1.0, 
 
-
-    mp = mesh_out[0] if isinstance(mesh_out, list) else mesh_out
-    if not isinstance(mp, pv.PolyData): mp = mp.extract_geometry()
-    mp = mp.clean().triangulate()
+    # Normalize and scale output using model config training params
+    sdf_sample = sdf_dataset[0]  # returns a dict
+    sample_dict, _ = sdf_sample
+    center, max_radius = get_norm_params(sdf_dataset, sample_dict, gt_path)
+    mesh_pv = normalize_mesh(mesh_out, gt_path, main_config, center, max_radius)
+    mesh_pv = mesh_pv.clean().triangulate()
     # Save to file
     base_name = os.path.splitext(os.path.basename(partial_mesh_path))[0]
     new_filename = f"{base_name}_partial.vtk"
     pred_path = os.path.join(out_dir, new_filename)
-    mp.save(pred_path)
+    mesh_pv.save(pred_path)
     # Calculate chamfer distance between partial-completed and original-ground truth mesh
     cd = chamfer_distance(pred_path, gt_path)
     return cd, pred_path
 
 # 4) Random search on a small validation subset to pick best cfg
-def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_trials=15, valN=30, log_path_csv=None, log_path_json=None):
+def random_search(pairs, model, config, mean_latent, latent_codes, device, out_dir, n_trials=15, valN=30, log_path_csv=None, log_path_json=None):
     # Set up directory for fine-tuning experiemnts
     os.makedirs(out_dir, exist_ok=True)
     subset = pairs[:valN]
@@ -173,8 +174,7 @@ def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_tr
 
     # Randomly pick optimization parameters from provided values
     for t in range(n_trials):
-
-        cfg = {
+        ft_cfg = {
             'top_k': random.choice([k95, k90, k99]),
             'iters1': random.choice([3000, 5000, 7000]),
             'iters2': random.choice([6000, 8000, 10000]),
@@ -187,8 +187,7 @@ def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_tr
             'sched_step': random.choice([500, 800, 1000]),
             'sched_gamma': random.choice([0.7, 0.8, 0.9]),
             'batch_infer': random.choice([16384, 32768]),
-            'gridN': random.choice([256, 320, 384]),
-        }
+            'gridN': random.choice([256, 320, 384]),}
         scores = []
         times = []
         # Set up directory for each trial
@@ -213,6 +212,7 @@ def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_tr
                                 center_pts=config['center_pts'],
                                 norm_pts=config['normalize_pts'],
                                 scale_method=config['scale_method'],
+                                scale_jointly=config['scale_jointly'],
                                 reference_mesh=None,
                                 verbose=config['verbose'],
                                 save_cache=config['cache'],
@@ -224,17 +224,17 @@ def random_search(pairs, model, mean_latent, latent_codes, device, out_dir, n_tr
             indices = torch.randperm(points.size(0))[:200]
             points = points[indices]
             sdf_vals = sdf_vals[indices].reshape(-1, 1)
-            cd, _ = run_trial(pm, gt, points, sdf_vals, cfg, trial_dir, model, mean_latent, latent_codes, device)
+            cd, _ = run_trial(pm, gt, points, sdf_dataset, sdf_vals, config, ft_cfg, trial_dir, model, mean_latent, latent_codes, device)
             mesh_time = time.time() - start
             scores.append(cd)
             times.append(mesh_time)
         # Get mean chamfer for all meshes from trial
         mean_cd = float(np.mean(scores))
         if mean_cd < best['score']:
-            best = {'score': mean_cd, 'cfg': cfg}
+            best = {'score': mean_cd, 'cfg': ft_cfg}
         # Append the current trial's results to the list
         mean_time = float(np.mean(times))
-        rows.append({'trial': t, 'mean_cd': mean_cd, 'mean_time': mean_time, **cfg})
+        rows.append({'trial': t, 'mean_cd': mean_cd, 'mean_time': mean_time, **ft_cfg})
         # Save results to csv
         if log_path_csv is not None:
             pd.DataFrame(rows).to_csv(log_path_csv, index=False)
@@ -251,7 +251,7 @@ model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, c
 mean_latent = latent_codes.mean(dim=0, keepdim=True)
 
 # Find the best hyperparameters using random search
-best_cfg, trial_rows = random_search(pairs, model, mean_latent, latent_codes, device,
+best_cfg, trial_rows = random_search(pairs, model, config, mean_latent, latent_codes, device,
                                     out_dir= TRAIN_DIR + "/shape_completion/fine_tuning",
                                     n_trials=10, valN=10,
                                     log_path_csv= TRAIN_DIR + "/shape_completion/fine_tuning/trial_scores.csv")
@@ -287,6 +287,7 @@ for pm_path, gt_path in subset:
         center_pts=config['center_pts'],
         norm_pts=config['normalize_pts'],
         scale_method=config['scale_method'],
+        scale_jointly=config['scale_jointly'],
         reference_mesh=None,
         verbose=config['verbose'],
         save_cache=config['cache'],
@@ -315,5 +316,5 @@ for pm_path, gt_path in subset:
     print("Downsampled SDF values shape:", sdf_vals.shape)  # Should be [1000, 1]
 
     # Optimize latents
-    cd, pred_path = run_trial(pm_path, gt_path, points, sdf_vals, best_cfg, outfpath, model, mean_latent, latent_codes, device)
+    cd, pred_path = run_trial(pm_path, gt_path, points, sdf_dataset, sdf_vals, config, best_cfg, outfpath, model, mean_latent, latent_codes, device)
     print(f"\n{os.path.basename(pm_path)} Chamfer={cd:.4f} → {pred_path}\n") 
