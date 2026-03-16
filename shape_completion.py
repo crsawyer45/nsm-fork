@@ -19,8 +19,8 @@ import vtk
 import re
 import random
 import open3d as o3d
-from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, get_sdfs, fixed_point_coords, safe_load_mesh_scalars 
-from NSM.optimization import pca_initialize_latent, get_top_k_pcs, sample_near_surface, downsample_partial_pointcloud, optimize_latent_partial, sample_points_in_bbox, load_slicer_mrkup_pts, load_slicer_roi_bbox
+from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, fixed_point_coords, safe_load_mesh_scalars, find_shape_completion_files 
+from NSM.optimization import pca_initialize_latent, get_top_k_pcs, optimize_latent_partial, normalize_mesh, get_norm_params
 # Monkey Patch into pymskt.mesh.meshes.Mesh
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
@@ -91,46 +91,18 @@ for i, vert_fname in enumerate(mesh_list):
     sample_dict, _ = sdf_sample
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
     sdf_vals = sample_dict['gt_sdf'].to(device)  # shape: [N, 1]
-    
-    # Extract normalization parameters
-    if hasattr(sdf_dataset, 'center') and sdf_dataset.center is not None:
-        # If scale_jointly=True
-        center = sdf_dataset.center
-        max_radius = sdf_dataset.max_radius
-        print(f"Using joint normalization: center={center}, max_radius={max_radius}")
-    else:
-        # Individual mesh normalization - need to load from stored data
-        # Check if center/max_radius are in sample_dict
-        if 'center_0' in sample_dict:
-            center = sample_dict['center_0'].cpu().numpy()
-            max_radius = sample_dict['max_radius_0'].cpu().numpy()
-            print(f"Using individual normalization: center={center}, max_radius={max_radius}")
-        else:
-            # Compute manually from original mesh
-            orig_mesh = pv.read(vert_fname)
-            center = orig_mesh.points.mean(axis=0)
-            max_radius = np.linalg.norm(orig_mesh.points - center, axis=1).max()
-            print(f"Computed normalization: center={center}, max_radius={max_radius}")
 
-    # Number of points to sample
-    n_samples = 240
-
-    # Generate random indices for downsampling
-    indices = torch.randperm(points.size(0))[:n_samples]
-
-    # Downsample the points and corresponding SDF values
+    # Use a subset of the points for optizimation/reconstruction
+    n_samples = 240 # TO DO: Define how many points to sample
+    indices = torch.randperm(points.size(0))[:n_samples] # Generate n_samples random indices
+    # Downsample the points and SDF values
     points = points[indices]
+    points = points.squeeze()
     sdf_vals = sdf_vals[indices]
+    sdf_vals = sdf_vals.reshape(-1, 1)
 
-    # Check the new shapes
-    print("Downsampled points shape:", points.shape)  # Should be [1000, 3]
-    print("Downsampled SDF values shape:", sdf_vals.shape)  # Should be [1000, 1]
-    
     # Optimize latents
     print("\n-----Optimizing latents----\n")
-    print("Partial points shape: ", points.shape)  # Should be [N, 3]
-    print("SDF values shape: ", sdf_vals.shape)  # Should be [N, 1] or [N]
-    sdf_vals = sdf_vals.reshape(-1, 1)
     # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
     latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, 
                                                        iters=3000, lr=1e-4, lambda_reg=1e-3, clamp_val=1.0, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.9, 
@@ -158,24 +130,9 @@ for i, vert_fname in enumerate(mesh_list):
                                 offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
                                 verbose=True, device=device, scale_to_original_mesh=False) #, smooth=1.0)
         
-    # Debug
-    # Manually un-normalize
-    mesh_pv = pv.wrap(mesh_out)
-    if config['normalize_pts'] == True:
-        print("Normalizing output mesh to match training transforms...")
-        mesh_pv.points = mesh_pv.points * max_radius + center
-    print(f"Output mesh bounds: {mesh_pv.bounds}")
-    # Compare to input mesh
-    input_mesh = pv.read(vert_fname)
-    print(f"Input mesh bounds: {input_mesh.bounds}")
-
-    # Ensure it's PyVista PolyData
-    if isinstance(mesh_out, list):
-        mesh_out = mesh_out[0]
-    if not isinstance(mesh_out, pv.PolyData):
-        mesh_pv = mesh_out.extract_geometry()
-    else:
-        mesh_pv = mesh_out
+    # Normalize and scale output using model config training params
+    center, max_radius = get_norm_params(sdf_dataset, sample_dict, vert_fname)
+    mesh_pv = normalize_mesh(mesh_out, vert_fname, config, center, max_radius)
 
     # Save mesh
     mesh_pv = mesh_pv.clean()

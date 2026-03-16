@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 from NSM.datasets import SDFSamples
 from NSM.models import TriplanarDecoder
-from NSM.mesh import get_sdfs  
 import torch.nn.functional as F
 import json
 import pyvista as pv
@@ -19,47 +18,12 @@ import vtk
 import re
 import random
 from pathlib import Path
-from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, get_sdfs, fixed_point_coords, safe_load_mesh_scalars, extract_species_prefix, parse_labels_from_filepaths
-from NSM.optimization import pca_initialize_latent, get_top_k_pcs, find_similar, find_similar_cos, optimize_latent
+from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, fixed_point_coords, safe_load_mesh_scalars, parse_labels_from_filepaths, find_shape_completion_files
+from NSM.optimization import pca_initialize_latent, get_top_k_pcs, find_similar, find_similar_cos, optimize_latent, normalize_mesh, get_norm_params
+from NSM.plotting import plot_predictions
 # Monkey Patch into pymskt.mesh.meshes.Mesh
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
-
-# Find shape completion files
-def find_shape_completion_files(root_dir):
-    return sorted(
-        str(p)
-        for p in Path(root_dir).rglob("*")
-        if (p.is_file()
-            and "zzz_" in p.name.lower()
-            and p.name.lower().endswith("shape_completion.vtk")))
-
-# Plot closest matches
-def plot_predictions(dim_reduced_coords, similar_coords, novel_coord, filepaths, out_fn):
-        if "tsne" in out_fn:
-            plot_type = "TSNE"
-        else:
-            plot_type = "PCA"
-        plt.figure(figsize=(8, 6))
-        plt.scatter(dim_reduced_coords[:, 0], dim_reduced_coords[:, 1], color='gray', alpha=0.3, label='Training Meshes')
-        # Plot most similar (1st one) in pink
-        plt.scatter(similar_coords[0, 0], similar_coords[0, 1], color='hotpink', s=80, label='Most Similar')
-        # Plot next 4 similar in blue
-        if len(similar_coords) > 1:
-            plt.scatter(similar_coords[1:, 0], similar_coords[1:, 1], color='blue', s=60, label='Other Top-5 Similar')
-        # Plot novel mesh in red
-        plt.scatter(*novel_coord, color='red', s=80, label='Novel Mesh')
-        # Aannotate each of the top-5 similar meshes
-        for idx, (x, y) in zip(similar_ids, similar_coords):
-            plt.text(x, y, filepaths[idx].split('.')[0], fontsize=6, color='black')
-        plt.title(f"Latent Space Visualization {plot_type}")
-        plt.xlabel("Component 1")
-        plt.ylabel("Component 2")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(outfpath + "/" + out_fn, dpi=300)
-        plt.close()
 
 # Define PC index and model checkpoint to use for analysis of novel mdeshes
 TRAIN_DIR = "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
@@ -74,23 +38,33 @@ device = config.get("device", "cuda:0")
 train_paths = config['list_mesh_paths']
 all_vtk_files = [os.path.basename(f) for f in train_paths]
 
-# Build list of meshes to be classified
+# --- Chose which meshes to classify --- #
+
+# Option 1: Build random list of meshes to be classified
 random_meshes = False # TO DO: Randomly classify meshes? (True or False)
+n_meshes = 5 # TO DO: Choose how many random meshes to inspect
 
-# Randomly select meshes
+# Option 2: Choose a specific mesh
+mesh_file = "ZZZZZ_VP-UA-12945_hollow_align.vtk"
+
+# Build mesh list
 if random_meshes == True:
-    #mesh_list = random.sample(config['test_paths'], 5)
-    mesh_list = random.sample(config['val_paths'], 5) # TO DO: Choose val or test paths
-
-# Manually choose meshes
+    #mesh_list = random.sample(config['test_paths'], n_meshes)
+    mesh_list = random.sample(config['val_paths'], n_meshes) # TO DO: Choose val or test paths
+# Manually choose mesh(es)
 else:
-    mesh_list = ["ZZZZZ_VP-UA-12945_hollow_align.vtk"]
+    mesh_list = [mesh_file]
 
-# If classying shape completion results
+# Option 3: Classify shape completion results
 shape_completion_results = True # TO DO: Inspect shape completion results? (True or False)
 if shape_completion_results == True:
-    mesh_dir = "shape_completion/predictions/" + os.path.splitext(mesh_list[0])[0]
+    mesh_dir = "shape_completion/predictions/"
+    if random_meshes == False:
+        mesh_dir = mesh_dir + os.path.splitext(mesh_file)[0]
     mesh_list = find_shape_completion_files(mesh_dir)
+    if random_meshes == True:
+        mesh_list = random.sample(mesh_list, n_meshes)
+# --- #
 
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
@@ -144,26 +118,6 @@ for i, vert_fname in enumerate(mesh_list):
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
     sdf_vals = sample_dict['gt_sdf'].to(device)  # shape: [N, 1]
 
-    # Extract normalization parameters
-    if hasattr(sdf_dataset, 'center') and sdf_dataset.center is not None:
-        # If scale_jointly=True
-        center = sdf_dataset.center
-        max_radius = sdf_dataset.max_radius
-        print(f"Using joint normalization: center={center}, max_radius={max_radius}")
-    else:
-        # Individual mesh normalization - need to load from stored data
-        # Check if center/max_radius are in sample_dict
-        if 'center_0' in sample_dict:
-            center = sample_dict['center_0'].cpu().numpy()
-            max_radius = sample_dict['max_radius_0'].cpu().numpy()
-            print(f"Using individual normalization: center={center}, max_radius={max_radius}")
-        else:
-            # Compute manually from original mesh
-            orig_mesh = pv.read(vert_fname)
-            center = orig_mesh.points.mean(axis=0)
-            max_radius = np.linalg.norm(orig_mesh.points - center, axis=1).max()
-            print(f"Computed normalization: center={center}, max_radius={max_radius}")
-
     # Optimize latents (DeepSDF has no encoder, so must use optimization to encode novel data)
     print("Optimizing latents")
     latent_novel = optimize_latent(model, points, sdf_vals, config['latent_size'], top_k_reg, mean_latent, latent_codes)
@@ -194,7 +148,7 @@ for i, vert_fname in enumerate(mesh_list):
     coords_2d = pca.fit_transform(latents)
     novel_coord = pca.transform(latent_novel.cpu().numpy())[0]
     similar_coords = coords_2d[similar_ids]
-    plot_predictions(coords_2d, similar_coords, novel_coord, all_vtk_files, out_fn="latent_space_pca_pca_regularized_95pct_cos.png")
+    plot_predictions(coords_2d, similar_ids, similar_coords, novel_coord, all_vtk_files, outfpath, out_fn="latent_space_pca_pca_regularized_95pct_cos.png")
 
     # t-SNE Plot
     # Data loading
@@ -205,7 +159,7 @@ for i, vert_fname in enumerate(mesh_list):
     train_coords = coords_with_novel[:-1]
     novel_coord = coords_with_novel[-1]
     similar_coords = train_coords[similar_ids]
-    plot_predictions(train_coords, similar_coords, novel_coord, all_vtk_files, "latent_space_tsne_pca_regularized_95pct_cos.png")
+    plot_predictions(train_coords, similar_ids, similar_coords, novel_coord, all_vtk_files, outfpath, out_fn="latent_space_tsne_pca_regularized_95pct_cos.png")
 
     # --- Reconstruct optimized latent into mesh to confirm it looks normal ---
     
@@ -225,24 +179,9 @@ for i, vert_fname in enumerate(mesh_list):
                                 offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
                                 verbose=True, device=device, scale_to_original_mesh=False) #, smooth=1.0)
 
-    # Debug
-    # Manually un-normalize
-    mesh_pv = pv.wrap(mesh_out)
-    if config['normalize_pts'] == True:
-        print("Normalizing output mesh to match training transforms...")
-        mesh_pv.points = mesh_pv.points * max_radius + center
-    print(f"Output mesh bounds: {mesh_pv.bounds}")
-    # Compare to input mesh
-    input_mesh = pv.read(vert_fname)
-    print(f"Input mesh bounds: {input_mesh.bounds}")
-
-    # Ensure it's PyVista PolyData
-    if isinstance(mesh_out, list):
-        mesh_out = mesh_out[0]
-    if not isinstance(mesh_out, pv.PolyData):
-        mesh_pv = mesh_out.extract_geometry()
-    else:
-        mesh_pv = mesh_out
+    # Normalize and scale output using model config training params
+    center, max_radius = get_norm_params(sdf_dataset, sample_dict, vert_fname)
+    mesh_pv = normalize_mesh(mesh_out, vert_fname, config, center, max_radius)
 
     # Save mesh
     output_path = outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_decoded_novel_pca_regularized_95pct_cos.vtk"
