@@ -442,3 +442,30 @@ def _build_legend_handles(life_history_info):
         handles.append(h)
         labels.append(info['life_history'])
     return handles, labels
+
+# Plot closest matches
+def plot_predictions(dim_reduced_coords, similar_ids, similar_coords, novel_coord, filepaths, outfpath, out_fn):
+        if "tsne" in out_fn:
+            plot_type = "TSNE"
+        else:
+            plot_type = "PCA"
+        plt.figure(figsize=(8, 6))
+        plt.scatter(dim_reduced_coords[:, 0], dim_reduced_coords[:, 1], color='gray', alpha=0.3, label='Training Meshes')
+        # Plot most similar (1st one) in pink
+        plt.scatter(similar_coords[0, 0], similar_coords[0, 1], color='hotpink', s=80, label='Most Similar')
+        # Plot next 4 similar in blue
+        if len(similar_coords) > 1:
+            plt.scatter(similar_coords[1:, 0], similar_coords[1:, 1], color='blue', s=60, label='Other Top-5 Similar')
+        # Plot novel mesh in red
+        plt.scatter(*novel_coord, color='red', s=80, label='Novel Mesh')
+        # Aannotate each of the top-5 similar meshes
+        for idx, (x, y) in zip(similar_ids, similar_coords):
+            plt.text(x, y, filepaths[idx].split('.')[0], fontsize=6, color='black')
+        plt.title(f"Latent Space Visualization {plot_type}")
+        plt.xlabel("Component 1")
+        plt.ylabel("Component 2")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(outfpath + "/" + out_fn, dpi=300)
+        plt.close()

@@ -13,7 +13,7 @@ import colorsys
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-
+from pathlib import Path
 
 # ICP transform
 class NumpyTransform:
@@ -336,3 +336,12 @@ def get_region(vertebra_label):
     elif vertebra_label.startswith('l') or vertebra_label.startswith('L'):
         return 'Lumbar'
     return 'Unknown'
+
+# Find shape completion files
+def find_shape_completion_files(root_dir):
+    return sorted(
+        str(p)
+        for p in Path(root_dir).rglob("*")
+        if (p.is_file()
+            and "zzz_" in p.name.lower()
+            and p.name.lower().endswith("shape_completion.vtk")))

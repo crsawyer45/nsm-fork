@@ -91,8 +91,8 @@ def optimize_latent(decoder, points, sdf_vals, latent_size, top_k, mean_latent, 
     return latent.detach().to(device)
 
 # Sample points near and far from surface to get range of SDF values for smooth interpolation
-def sample_near_surface(surface_pts, eps=0.005, fraction_nonzero=0.3, 
-                        fraction_far=0.05, far_eps=0.05):
+def sample_near_surface(mesh, surface_pts, eps=0.005, fraction_nonzero=0.3, 
+                        fraction_far=0.05, far_eps=0.05, device='cuda'):
     n_pts = surface_pts.shape[0]
     # Slightly perturbed points (near-surface)
     n_nonzero = int(n_pts * fraction_nonzero)
@@ -292,3 +292,44 @@ def sample_points_in_bbox(mesh_path, bbox_params, n_points=500, method='poisson'
         idx = np.random.choice(len(pts_inside), n_points_final, replace=False)
         pts_inside = pts_inside[idx]
     return pts_inside
+
+# Extract normalization parameters
+def get_norm_params(sdf_dataset, sample_dict, vert_fname):
+    if hasattr(sdf_dataset, 'center') and sdf_dataset.center is not None:
+        # If scale_jointly=True
+        center = sdf_dataset.center
+        max_radius = sdf_dataset.max_radius
+        print(f"Using joint normalization: center={center}, max_radius={max_radius}")
+    else:
+        # Check if center/max_radius are in sample_dict
+        if 'center_0' in sample_dict:
+            center = sample_dict['center_0'].cpu().numpy()
+            max_radius = sample_dict['max_radius_0'].cpu().numpy()
+            print(f"Using individual normalization: center={center}, max_radius={max_radius}")
+        else:
+            # Compute manually from original mesh
+            orig_mesh = pv.read(vert_fname)
+            center = orig_mesh.points.mean(axis=0)
+            max_radius = np.linalg.norm(orig_mesh.points - center, axis=1).max()
+            print(f"Computed normalization: center={center}, max_radius={max_radius}")
+    return center, max_radius
+
+# Normalize mesh
+def normalize_mesh(mesh_out, vert_fname, config, center, max_radius):
+    # Manually normalize
+    mesh_pv = pv.wrap(mesh_out)
+    if config['normalize_pts'] == True:
+        print("Normalizing output mesh to match training transforms...")
+        mesh_pv.points = mesh_pv.points * max_radius + center
+    print(f"Output mesh bounds: {mesh_pv.bounds}")
+    # Compare to input mesh
+    input_mesh = pv.read(vert_fname)
+    print(f"Input mesh bounds: {input_mesh.bounds}")
+    # Ensure it's PyVista PolyData
+    if isinstance(mesh_out, list):
+        mesh_out = mesh_out[0]
+    if not isinstance(mesh_out, pv.PolyData):
+        mesh_pv = mesh_out.extract_geometry()
+    else:
+        mesh_pv = mesh_out 
+    return mesh_pv
